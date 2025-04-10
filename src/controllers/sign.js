@@ -1,11 +1,12 @@
 // src/controllers/sign.js
 
-import bcrypt from 'bcrypt'; 
-import connectDB from '../db/index.js';  
-import jwt from 'jsonwebtoken'; 
-import dotenv from "dotenv";
+import bcrypt from 'bcrypt';
+import connectDB from '../db/index.js';
+import jwt from 'jsonwebtoken';
+import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
+import { logger } from '../logger.js';
 
 dotenv.config();  // Load environment variables
 
@@ -18,289 +19,387 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// Register User with department selection and pending approval
+const SALT_ROUNDS = 10;
+
 export const registerCustomer = async (req, res) => {
-    const { username, email, password, department_id } = req.body; 
+    const { username, email, role_type, team_id } = req.body;
 
     try {
-        const connection = await connectDB();
-        
-        // Check if the user already exists
-        const [existingUser] = await connection.query('SELECT * FROM users WHERE email = ? OR username = ?', [email, username]);
-        if (existingUser.length > 0) {
-            return res.status(400).json({ message: 'Username or email already exists' });
-        }
+        const pool = await connectDB();
+        const connection = await pool.getConnection();
 
-        // Hash the password
-        const hashedPassword = await bcrypt.hash(password, 10);
+        try {
+            await connection.beginTransaction();
 
-        // Insert the new user into the 'users' table with pending status
-        const [result] = await connection.query(
-            'INSERT INTO users (username, email, password, department_id, status, role) VALUES (?, ?, ?, ?, ?, ?)',
-            [username, email, hashedPassword, department_id, 'pending', 'User']
-        );
-
-        // Get department admin's email
-        const [deptAdmin] = await connection.query(
-            'SELECT u.email, u.username FROM users u WHERE u.department_id = ? AND u.role = "Department_Admin"',
-            [department_id]
-        );
-
-        if (deptAdmin.length > 0) {
-            // Generate approval token
-            const approvalToken = crypto.randomBytes(32).toString('hex');
-            
-            // Store approval token
-            await connection.query(
-                'INSERT INTO approval_tokens (user_id, token, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 24 HOUR))',
-                [result.insertId, approvalToken]
+            // Check if username or email already exists
+            const [existingUser] = await connection.query(
+                'SELECT * FROM users WHERE email = ? OR username = ?', 
+                [email, username]
             );
 
-            // Send email to department admin
-            const approvalLink = `${process.env.FRONTEND_URL}/approve-user/${approvalToken}`;
+            if (existingUser.length > 0) {
+                await connection.rollback();
+                const message = existingUser[0].email === email ? 'Email already exists' : 'Username already exists';
+                return res.status(400).json({ message });
+            }
+
+            // Get role ID based on role_type
+            const [roles] = await connection.query(
+                'SELECT id FROM roles WHERE role_name = ?',
+                [role_type || 'user']
+            );
+
+            if (roles.length === 0) {
+                await connection.rollback();
+                throw new Error('Role not found');
+            }
+
+            // Use default password '12345678'
+            const defaultPassword = '12345678';
+            const hashedPassword = await bcrypt.hash(defaultPassword, SALT_ROUNDS);
+
+            // Insert new user
+            const [result] = await connection.query(
+                'INSERT INTO users (username, email, password, team_id, role_id) VALUES (?, ?, ?, ?, ?)',
+                [username, email, hashedPassword, team_id, roles[0].id]
+            );
+
+            // Send welcome email
             const mailOptions = {
                 from: process.env.EMAIL_USER,
-                to: deptAdmin[0].email,
-                subject: 'New User Registration Approval Required',
+                to: email,
+                subject: 'Welcome to Digital Flow',
                 html: `
-                    <h2>New User Registration Requires Your Approval</h2>
-                    <p>Dear ${deptAdmin[0].username},</p>
-                    <p>A new user has registered for your department:</p>
-                    <ul>
-                        <li>Username: ${username}</li>
-                        <li>Email: ${email}</li>
-                    </ul>
-                    <p>Click the link below to approve or reject this registration:</p>
-                    <a href="${approvalLink}" style="display: inline-block; padding: 10px 20px; background-color: #EF6F53; color: white; text-decoration: none; border-radius: 5px;">Review Registration</a>
-                    <p>Best regards,<br>FundFloat Team</p>
+                    <h2>Welcome ${username}!</h2>
+                    <p>Your account has been created successfully.</p>
+                    <p>You can now login to your account using your email and the default password: <strong>12345678</strong></p>
+                    <p>Please change your password after your first login.</p>
+                    <a href="${process.env.FRONTEND_URL}/login" style="display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 5px;">Login Now</a>
+                    <p>Best regards,<br>Digital Flow Team</p>
                 `
             };
 
             await transporter.sendMail(mailOptions);
-        } else {
-            // No department admin found - notify super admin or handle accordingly
-            console.error('No department admin found for department:', department_id);
+
+            // Get all permissions
+            const [permissions] = await connection.query('SELECT id, permission_name FROM permissions');
+
+            // Set permissions based on role
+            for (const permission of permissions) {
+                let hasPermission = false; // Default to false
+
+                // Specific role-based permission logic
+                if (role_type === 'user') {
+                    // Users only get view_team_customers by default
+                    hasPermission = permission.permission_name === 'view_team_customers';
+                } else if (role_type === 'team_leader') {
+                    // Team leaders get view_customer by default
+                    hasPermission = permission.permission_name === 'view_customer';
+                } else if (role_type === 'business_head') {
+                    // Business heads get all permissions
+                    hasPermission = true;
+                }
+
+                // If permissions were explicitly provided in the request, use those values
+                if (permissions && permissions[permission.permission_name] !== undefined) {
+                    hasPermission = permissions[permission.permission_name];
+                }
+
+                await connection.query(
+                    'INSERT INTO user_permissions (user_id, permission_id, value) VALUES (?, ?, ?)',
+                    [result.insertId, permission.id, hasPermission]
+                );
+            }
+
+            await connection.commit();
+            connection.release();
+
+            res.status(201).json({
+                success: true,
+                message: 'Registration successful',
+                userId: result.insertId
+            });
+
+        } catch (error) {
+            await connection.rollback();
+            connection.release();
+            throw error;
+        } finally {
+            if (connection) {
+                connection.release();
+            }
         }
 
-        // Send success response
-        res.status(201).json({ 
-            message: 'Registration submitted successfully. Awaiting department admin approval.',
-            status: 'pending'
-        });
     } catch (error) {
-        console.error('Error registering user:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        logger.error('Registration error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Registration failed. Please try again later.'
+        });
     }
 };
 
-// Get departments list
-export const getDepartments = async (req, res) => {
+// Get teams list
+export const getTeams = async (req, res) => {
+    let connection;
     try {
-        const connection = await connectDB();
-        const [departments] = await connection.query(
-            'SELECT id, name FROM departments WHERE name != ? ORDER BY name',
-            ['Team 007']
-        );
-        res.json(departments);
-    } catch (error) {
-        console.error('Error fetching departments:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-
-// Handle registration approval/rejection
-export const handleRegistrationApproval = async (req, res) => {
-    const { token, approved } = req.body;
-
-    try {
-        const connection = await connectDB();
-
-        // Get token details and user information
-        const [tokenDetails] = await connection.query(
-            `SELECT at.user_id, at.expires_at, u.email, u.username, u.department_id,
-             (SELECT email FROM users WHERE department_id = u.department_id AND role = 'Department_Admin' LIMIT 1) as admin_email
-             FROM approval_tokens at 
-             JOIN users u ON at.user_id = u.id 
-             WHERE at.token = ? AND at.used = 0`,
-            [token]
+        const pool = await connectDB();
+        connection = await pool.getConnection();
+        const [teams] = await connection.query(
+            'SELECT id, team_name FROM teams ORDER BY team_name'
         );
 
-        if (tokenDetails.length === 0) {
-            return res.status(400).json({ message: 'Invalid or expired token' });
-        }
-
-        const tokenRecord = tokenDetails[0];
-
-        // Check if token is expired
-        if (new Date(tokenRecord.expires_at) < new Date()) {
-            return res.status(400).json({ message: 'Approval link has expired' });
-        }
-
-        // Add to users_history for both approved and rejected cases
-        await connection.query(
-            'INSERT INTO users_history (username, email, status, department_admin_email) VALUES (?, ?, ?, ?)',
-            [tokenRecord.username, tokenRecord.email, approved ? 'active' : 'reject', tokenRecord.admin_email]
-        );
-
-        if (approved) {
-            // Update user status to active
-            await connection.query(
-                'UPDATE users SET status = ? WHERE id = ?',
-                ['active', tokenRecord.user_id]
-            );
-        } else {
-            // If rejected, delete from users table
-            await connection.query(
-                'DELETE FROM users WHERE id = ?',
-                [tokenRecord.user_id]
-            );
-        }
-
-        // Mark token as used
-        await connection.query(
-            'UPDATE approval_tokens SET used = 1 WHERE token = ?',
-            [token]
-        );
-
-        // Send email notification to user
-        const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: tokenRecord.email,
-            subject: `Registration ${approved ? 'Approved' : 'Rejected'}`,
-            html: `
-                <h2>Registration ${approved ? 'Approved' : 'Rejected'}</h2>
-                <p>Hello ${tokenRecord.username},</p>
-                <p>Your registration has been ${approved ? 'approved' : 'rejected'} by the department admin.</p>
-                ${approved ? `
-                    <p>You can now login to your account using your email and password.</p>
-                    <a href="${process.env.FRONTEND_URL}/login" style="display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 5px;">Login Now</a>
-                ` : '<p>Please contact your department administrator if you have any questions.</p>'}
-                <p>Best regards,<br>FundFloat Team</p>
-            `
-        };
-
-        await transporter.sendMail(mailOptions);
-
-        res.json({ 
-            message: `Registration ${approved ? 'approved' : 'rejected'} successfully`,
-            status: approved ? 'active' : 'rejected'
+        res.json({
+            success: true,
+            teams
         });
     } catch (error) {
-        console.error('Error handling registration approval:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        logger.error('Error fetching teams:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Failed to fetch teams' 
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };
 
 // Login User
 export const loginCustomer = async (req, res) => {
-    const { email, password } = req.body; 
+    const { email, password } = req.body;
+    const deviceId = req.headers['x-device-id'];
 
+    if (!deviceId) {
+        return res.status(400).json({ message: 'Device identifier is required' });
+    }
+
+    let connection;
     try {
-        const connection = await connectDB();
+        const pool = await connectDB();
+        connection = await pool.getConnection();
 
-        // Check if the user exists with role and status information
-        const [users] = await connection.query(`
-            SELECT u.id, u.username, u.email, u.role, u.status, u.department_id, d.name as department_name,
-                   u.password  
-            FROM users u
-            LEFT JOIN departments d ON u.department_id = d.id
-            WHERE u.email = ?
-        `, [email]);
-        
+        await connection.beginTransaction();
+
+        // Get user with role
+        const [users] = await connection.query(
+            `SELECT u.*, r.role_name 
+             FROM users u 
+             JOIN roles r ON u.role_id = r.id 
+             WHERE u.email = ?`,
+            [email]
+        );
+
         if (users.length === 0) {
-            return res.status(404).json({ message: 'User not found' });
+            await connection.rollback();
+            return res.status(401).json({ 
+                success: false,
+                message: 'Invalid credentials' 
+            });
         }
 
         const user = users[0];
 
-        // Check user status
-        if (user.status === 'pending') {
-            return res.status(403).json({ 
-                message: 'Your registration is pending approval. Please wait for the department admin to approve your account.',
-                status: 'pending'
-            });
-        }
-
-        if (user.status === 'rejected') {
-            return res.status(403).json({ 
-                message: 'Your registration has been rejected. Please contact your department administrator.',
-                status: 'rejected'
-            });
-        }
-        
-        // Verify password
-        const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) {
-            return res.status(401).json({ message: 'Invalid password' });
-        }
-
-        // Create JWT token
-        const token = jwt.sign(
-            { 
-                userId: user.id,
-                username: user.username,
-                email: user.email,
-                role: user.role,
-                department_id: user.department_id
-            },
-            process.env.JWT_SECRET,
-            { expiresIn: '24h' }
+        // Check for recent failed attempts
+        const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
+        const [recentFailedAttempts] = await connection.query(
+            'SELECT COUNT(*) as count FROM login_history WHERE user_id = ? AND login_time > ? AND is_active = false',
+            [user.id, threeMinutesAgo]
         );
 
-        // Send success response with token
+        if (recentFailedAttempts[0].count >= 3) {
+            const [lastAttempt] = await connection.query(
+                'SELECT login_time FROM login_history WHERE user_id = ? AND is_active = false ORDER BY login_time DESC LIMIT 1',
+                [user.id]
+            );
+            
+            const lastAttemptTime = new Date(lastAttempt[0].login_time);
+            const timeElapsed = Date.now() - lastAttemptTime;
+            const remainingTime = Math.ceil((180000 - timeElapsed) / 1000);
+
+            if (remainingTime > 0) {
+                await connection.rollback();
+                return res.status(429).json({
+                    success: false,
+                    message: 'Too many failed attempts',
+                    remainingTime,
+                    isLockedOut: true
+                });
+            }
+        }
+
+        // Validate password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        if (!isValidPassword) {
+            // Record failed attempt
+            await connection.query(
+                'INSERT INTO login_history (user_id, device_id, is_active, login_time) VALUES (?, ?, false, CURRENT_TIMESTAMP)',
+                [user.id, deviceId]
+            );
+
+            await connection.commit();
+            connection.release();
+
+            // Check if this attempt triggers lockout
+            const [newFailedAttempts] = await connection.query(
+                'SELECT COUNT(*) as count FROM login_history WHERE user_id = ? AND login_time > ? AND is_active = false',
+                [user.id, threeMinutesAgo]
+            );
+
+            if (newFailedAttempts[0].count >= 3) {
+                return res.status(429).json({
+                    success: false,
+                    message: 'Too many failed attempts',
+                    remainingTime: 180,
+                    isLockedOut: true
+                });
+            }
+
+            return res.status(401).json({ 
+                success: false,
+                message: 'Invalid credentials' 
+            });
+        }
+
+
+
+        // Deactivate existing sessions
+        await connection.query(
+            'UPDATE login_history SET is_active = false, logout_time = CURRENT_TIMESTAMP WHERE user_id = ? AND device_id != ? AND is_active = true',
+            [user.id, deviceId]
+        );
+
+        // Create new session
+        const [session] = await connection.query(
+            'INSERT INTO login_history (user_id, device_id, login_time, is_active) VALUES (?, ?, CURRENT_TIMESTAMP, true)',
+            [user.id, deviceId]
+        );
+
+        // Generate JWT
+        // Get user permissions
+        const [permissions] = await connection.query(
+            `SELECT p.permission_name 
+             FROM permissions p 
+             JOIN user_permissions up ON p.id = up.permission_id 
+             WHERE up.user_id = ? AND up.value = true`,
+            [user.id]
+        );
+
+        // Keep role name in lowercase
+        const roleName = user.role_name.toLowerCase();
+
+        // Get permissions array
+        const userPermissions = permissions.map(p => p.permission_name);
+
+        const token = jwt.sign({
+            userId: user.id,
+            username: user.username,
+            email: user.email,
+            role: roleName,
+            deviceId,
+            sessionId: session.insertId,
+            team_id: user.team_id,
+            permissions: userPermissions
+        }, process.env.JWT_SECRET, { expiresIn: '24h' });
+
+        await connection.commit();
+        connection.release();
+
         res.json({
-            message: 'Login successful',
+            success: true,
             token,
             user: {
                 id: user.id,
                 username: user.username,
                 email: user.email,
-                role: user.role,
-                department_id: user.department_id,
-                department_name: user.department_name
+                role: roleName,
+                team_id: user.team_id,
+                permissions: permissions.map(p => p.permission_name)
             }
         });
+
     } catch (error) {
-        console.error('Error during login:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        if (connection) {
+            await connection.rollback();
+            connection.release();
+        }
+        logger.error('Login error:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'An error occurred during login' 
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };
 
 // Logout User
 export const logoutCustomer = async (req, res) => {
-    const userId = req.user.userId;  // Assuming you have middleware that attaches user info to req
-
+    let connection;
     try {
-        const connection = await connectDB();
+        const pool = await connectDB();
+        connection = await pool.getConnection();
 
-        // Update the logout_time for the user's latest login record
-        await connection.query(
-            'UPDATE login_history SET logout_time = NOW() WHERE user_id = ? AND logout_time IS NULL',
-            [userId]
+        await connection.beginTransaction();
+
+        const deviceId = req.headers['x-device-id'];
+        const userId = req.user?.userId;
+
+        if (!userId || !deviceId) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'User ID and Device ID are required' });
+        }
+
+        // Update only the specific session for this device
+        const [result] = await connection.query(
+            'UPDATE login_history SET is_active = false, logout_time = NOW() WHERE user_id = ? AND device_id = ? AND is_active = true',
+            [userId, deviceId]
         );
 
-        res.status(200).json({ message: 'User logged out successfully' });
+        await connection.commit();
+        connection.release();
+
+        if (result.affectedRows === 0) {
+            return res.status(200).json({ message: 'Already logged out' });
+        }
+
+        res.status(200).json({ message: 'Logged out successfully' });
+
     } catch (error) {
-        console.error('Error during logout:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        if (connection) {
+            await connection.rollback();
+            connection.release();
+        }
+        console.error('Logout error:', error);
+        res.status(500).json({ message: 'Failed to logout' });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };
 
-
 // Fetch Current User
 export const fetchCurrentUser = async (req, res) => {
+    const pool = await connectDB();
+    let connection;
     try {
-        // Log incoming request user data
-        // console.log('Request user data:', req.user);
-
-        const connection = await connectDB();
+        connection = await pool.getConnection();
 
         // Retrieve the user's information based on their ID
         const [users] = await connection.query(`
-            SELECT u.id, u.username, u.email, u.role, u.department_id, d.name as department_name
+            SELECT u.id, u.username, u.email, r.role_name as role, u.team_id, t.team_name,
+                   u.role_id, GROUP_CONCAT(p.permission_name) as permissions
             FROM users u
-            LEFT JOIN departments d ON u.department_id = d.id
+            LEFT JOIN teams t ON u.team_id = t.id
+            LEFT JOIN roles r ON u.role_id = r.id
+            LEFT JOIN user_permissions up ON u.id = up.user_id
+            LEFT JOIN permissions p ON up.permission_id = p.id AND up.value = true
             WHERE u.id = ?
+            GROUP BY u.id
         `, [req.user.userId]);
         
         if (users.length === 0) {
@@ -308,28 +407,26 @@ export const fetchCurrentUser = async (req, res) => {
         }
 
         const user = users[0];
-
-        // Log user data from database
-        // console.log('User data from database:', {
-        //     id: user.id,
-        //     username: user.username,
-        //     role: user.role,
-        //     department_id: user.department_id,
-        //     department_name: user.department_name
-        // });
+        const permissions = user.permissions ? user.permissions.split(',') : [];
 
         // Send success response with user information
         res.status(200).json({
+            success: true,
             id: user.id,
             username: user.username,
             email: user.email,
             role: user.role,
-            department_id: user.department_id ? parseInt(user.department_id) : null,
-            department_name: user.department_name
+            team_id: user.team_id ? parseInt(user.team_id) : null,
+            team_name: user.team_name,
+            permissions: permissions
         });
     } catch (error) {
         console.error('Error fetching current user:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        return res.status(500).json({ message: 'Internal server error' });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };
 
@@ -353,8 +450,9 @@ export const forgotPassword = async (req, res) => {
             .update(user.id + user.email + Date.now().toString())
             .digest('hex');
 
+
         // Create reset URL
-        const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:4000'}/reset-password/${tempToken}`;
+        const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:2000'}/reset-password/${tempToken}`;
 
         // Send email
         const mailOptions = {
@@ -374,6 +472,7 @@ export const forgotPassword = async (req, res) => {
                     display: inline-block;
                     margin: 20px 0;
                 ">Reset Password</a>
+                <p>This link will expire in 1 hour.</p>
                 <p>If you didn't request this, please ignore this email.</p>
             `
         };
@@ -386,6 +485,8 @@ export const forgotPassword = async (req, res) => {
         res.status(500).json({ message: 'Failed to send reset email' });
     }
 };
+
+
 
 // Send OTP (Reset Password Link)
 export const sendOTP = async (req, res) => {
@@ -406,14 +507,14 @@ export const sendOTP = async (req, res) => {
         const user = users[0];
 
         // Generate token with user ID
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: "20m" });
+        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: "1h" });
         const resetLink = `${process.env.FRONTEND_URL}/reset-password/${user.id}/${token}`;
 
         // Mail options
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: email,
-            subject: 'Password Reset Request - FundFloat',
+            subject: 'Password Reset Request - Digital Flow',
             html: `
                 <h2>Password Reset Request</h2>
                 <p>Dear ${user.username},</p>
@@ -426,7 +527,7 @@ export const sendOTP = async (req, res) => {
                 <a href="${resetLink}" style="display: inline-block; padding: 10px 20px; background-color: #EF6F53; color: white; text-decoration: none; border-radius: 5px;">Reset Password</a>
                
                 <p>If you didn't request this password reset, please ignore this email or contact support if you have concerns.</p>
-                <p>Best regards,<br>FundFloat Team</p>
+                <p>Best regards,<br>Digital Flow Team</p>
             `
         };
 
@@ -447,6 +548,26 @@ export const resetPasswordWithToken = async (req, res) => {
     try {
         const { id, token } = req.params;
         const { newPassword } = req.body;
+
+        // Password validation
+        if (!newPassword || newPassword.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+        }
+
+        // Check for at least one uppercase letter
+        if (!/[A-Z]/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one uppercase letter' });
+        }
+
+        // Check for at least one lowercase letter
+        if (!/[a-z]/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one lowercase letter' });
+        }
+
+        // Check for at least one number
+        if (!/\d/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one number' });
+        }
 
         // Verify token
         jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
@@ -485,31 +606,119 @@ export const resetPasswordWithToken = async (req, res) => {
 
 // Reset Password
 export const resetPassword = async (req, res) => {
-    const { email, newPassword } = req.body;
+    const { token } = req.params;
+    const { newPassword } = req.body;
 
     try {
-        const connection = await connectDB();
-
-        // Find user by email
-        const [users] = await connection.query('SELECT * FROM users WHERE email = ?', [email]);
-
-        if (users.length === 0) {
-            return res.status(400).json({ message: 'User not found' });
+        // Password validation
+        if (!newPassword || newPassword.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters long' });
         }
 
-        // Hash new password
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        // Check for at least one uppercase letter
+        if (!/[A-Z]/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one uppercase letter' });
+        }
 
-        // Update password
-        await connection.query(
-            'UPDATE users SET password = ? WHERE email = ?',
-            [hashedPassword, email]
+        // Check for at least one lowercase letter
+        if (!/[a-z]/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one lowercase letter' });
+        }
+
+        // Check for at least one number
+        if (!/\d/.test(newPassword)) {
+            return res.status(400).json({ message: 'Password must contain at least one number' });
+        }
+
+        // Verify JWT token
+        jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
+            if (err) {
+                return res.status(400).json({ message: 'Invalid or expired token' });
+            }
+
+            try {
+                const connection = await connectDB();
+                
+                // Hash the new password
+                const hashedPassword = await bcrypt.hash(newPassword, 10);
+                
+                // Update password using the email from the token
+                await connection.query(
+                    'UPDATE users SET password = ? WHERE email = ?',
+                    [hashedPassword, decoded.email]
+                );
+
+                res.status(200).json({ message: 'Password reset successful' });
+            } catch (error) {
+                console.error('Error updating password:', error);
+                res.status(500).json({ message: 'Failed to update password' });
+            }
+        });
+    } catch (error) {
+        console.error('Error resetting password:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+};
+
+// Check session status
+export const checkSession = async (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const deviceId = req.headers['x-device-id'];
+
+    if (!token || !deviceId) {
+        return res.status(401).json({
+            success: false,
+            message: 'Authentication required',
+            forceLogout: true
+        });
+    }
+
+    let connection;
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const pool = await connectDB();
+        connection = await pool.getConnection();
+
+        // Get the latest active session for this user
+        const [sessions] = await connection.execute(
+            'SELECT * FROM login_history WHERE user_id = ? AND is_active = true ORDER BY login_time DESC LIMIT 1',
+            [decoded.userId]
         );
 
-        res.status(200).json({ message: 'Password reset successful' });
+        if (sessions.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'No active session found',
+                forceLogout: true
+            });
+        }
 
+        const latestSession = sessions[0];
+
+        // Check if this device is the latest active session
+        if (latestSession.device_id !== deviceId || latestSession.id !== decoded.sessionId) {
+            return res.status(401).json({
+                success: false,
+                message: 'Session invalidated due to login from another device',
+                forceLogout: true
+            });
+        }
+
+        // Session is valid
+        res.status(200).json({
+            success: true,
+            message: 'Session is valid'
+        });
     } catch (error) {
-        console.error('Error in reset password:', error);
-        res.status(500).json({ message: 'Failed to reset password' });
+        logger.error(`Check session error: ${error.message}`);
+        res.status(401).json({
+            success: false,
+            message: 'Session validation failed',
+            forceLogout: true
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };

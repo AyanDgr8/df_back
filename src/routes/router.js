@@ -1,6 +1,8 @@
 // src/routes/router.js
 
 import express from 'express';
+import teamRoutes from './teamRoutes.js';
+
 import {
     gethistoryCustomer,
     searchCustomers,
@@ -10,40 +12,51 @@ import {
     makeNewRecord,
     deleteCustomer,
     updateCustomerFieldsByPhone,
-    getUsers,
     assignCustomerToTeam,
-    downloadCustomerDataNew,
     checkDuplicates,
-    getDepartmentRecords
+    getTeamRecords,
+    createCustomer,
+    getCustomersByDateRange
 } from '../controllers/customers.js';
 
-import {
-    loginCustomer, 
-    logoutCustomer, 
+import { 
     registerCustomer, 
-    fetchCurrentUser,
-    forgotPassword,
-    resetPassword,
+    loginCustomer, logoutCustomer, 
+    fetchCurrentUser, forgotPassword, 
+    resetPasswordWithToken, resetPassword,
     sendOTP,
-    resetPasswordWithToken,
-    getDepartments,     
-    handleRegistrationApproval
+    getTeams, checkSession 
 } from '../controllers/sign.js';
 
 import { getReminders, getAllReminders } from '../controllers/schedule.js';
 
 import { uploadCustomerData, confirmUpload } from '../controllers/uploadFile.js';
+import { downloadCustomerData } from '../controllers/downloadFile.js';
 import { authenticateToken } from '../middlewares/auth.js';
+import { checkPermission } from '../middlewares/checkPermission.js';
 
 import { checkCustomerByPhone } from '../controllers/newnum.js';
 
 import restrictUsers from '../middlewares/restrictUsers.js';
 
+import { validateSession } from '../middlewares/sessionMiddleware.js';
+
+import { createUser, getAllUsers, getTeamMembers } from '../controllers/users.js';
+
 const router = express.Router();
 
-// Route for user registration
-router.post('/register', restrictUsers, registerCustomer);
+// Mount team routes
+router.use('/', teamRoutes);
 
+// Route for user registration
+router.post('/register', restrictUsers, async (req, res) => {
+    try {
+        await registerCustomer(req, res);
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ message: 'Registration failed' });
+    }
+});
 // Route for user login
 router.post('/login', loginCustomer);
 
@@ -56,66 +69,88 @@ router.post('/reset-password/:id/:token', resetPasswordWithToken);
 // Route for forgot password
 router.post('/forgot-password', forgotPassword);
 
-// Route for reset password
+// Route for resetting password with token
 router.post('/reset-password/:token', resetPassword);
+
 
 // Route for user logout
 router.post('/logout', authenticateToken, logoutCustomer);
 
-router.get('/departments', getDepartments);
-router.post('/approve-registration',  handleRegistrationApproval);
+// Route to check session
+router.get('/check-session', validateSession, checkSession);
 
-// Route to get latest customers
-router.get('/customers', authenticateToken, getAllCustomers);
+router.get('/players/teams', getTeams);
+
+// Route to get latest customers based on role
+router.get('/customers', authenticateToken, checkPermission('view_customer'), getAllCustomers);
 
 // Route to search customers
-router.get('/customers/search', authenticateToken, searchCustomers);
+router.get('/customers/search', authenticateToken, checkPermission('view_customer'), searchCustomers);
+
+// Add these after your existing /customers route
+router.get('/customers/team', authenticateToken, checkPermission('view_team_customers'), getAllCustomers);
+router.get('/customers/assigned', authenticateToken, checkPermission('view_assigned_customers'), getAllCustomers);
+
+// Add these after your customer/new route
+router.put('/customer/:id', authenticateToken, checkPermission('edit_customer'), updateCustomer);
+router.delete('/customer/:id', authenticateToken, checkPermission('delete_customer'), deleteCustomer);
 
 // Route to check if customer exists by phone number
-router.get('/customers/phone/:phone_no', authenticateToken, checkCustomerByPhone);
+router.get('/customers/phone/:mobile', authenticateToken, checkPermission('view_customer'), checkCustomerByPhone);
 
 // Route to create a new customer record
-router.post('/customer/new', authenticateToken, makeNewRecord);
+router.post('/customer/new', authenticateToken, checkPermission('create_customer'), makeNewRecord);
 
 // Route to create a new customer record with a new number 
-router.post('/customer/new/:phone_no',authenticateToken, makeNewRecord);
+router.post('/customer/new/:mobile', authenticateToken, checkPermission('create_customer'), makeNewRecord);
 
 // Route to update a customer by ID
-router.put('/customers/:id',authenticateToken, updateCustomer);
+router.put('/customers/:id', authenticateToken, checkPermission('edit_customer'), updateCustomer);
+
+// Route to create a new customer
+router.post('/customers/new', authenticateToken, checkPermission('create_customer'), createCustomer);
 
 // Change history routes
-router.get('/customers/log-change/:id', authenticateToken, gethistoryCustomer);
-router.post('/customers/log-change', authenticateToken, historyCustomer);
-router.patch('/customers/phone/:phone/updates', authenticateToken, updateCustomerFieldsByPhone);
+router.get('/customers/log-change/:id', authenticateToken, checkPermission('view_customer'), gethistoryCustomer);
+router.post('/customers/log-change', authenticateToken, checkPermission('edit_customer'), historyCustomer);
+router.patch('/customers/phone/:mobile/updates', authenticateToken, checkPermission('edit_customer'), updateCustomerFieldsByPhone);
 
-// Route to delete a custom field
-router.delete('/customer/:id', authenticateToken, deleteCustomer);
 
 // File upload routes
-router.post('/upload', authenticateToken, uploadCustomerData);
-router.post('/upload/confirm', authenticateToken, confirmUpload);
+router.post('/upload', authenticateToken, checkPermission('upload_document'), uploadCustomerData);
+router.post('/upload/confirm', authenticateToken, checkPermission('upload_document'), confirmUpload);
 
 // Route to fetch current user
 router.get('/current-user', authenticateToken, fetchCurrentUser);
 
+// Reminder routes
+router.get('/customers/reminders', authenticateToken, getReminders);
+router.get('/customers/getAllReminders', authenticateToken, getAllReminders);
+
 // Route to check reminders
-router.get('/customers/reminders', authenticateToken, getAllReminders);
+router.get('/customers/reminders', authenticateToken, getReminders);
 
 // Route to update specific customer fields by phone number
-router.post('/customers/phone/:phone_no_primary/updates/', updateCustomerFieldsByPhone);
+router.post('/customers/phone/:mobile/updates/', updateCustomerFieldsByPhone);
 
-router.get('/users', authenticateToken, getUsers);
-
-// Route to assign customer to team
-router.post('/assign-customer', authenticateToken, assignCustomerToTeam);
+// Route to assign customers to team/agent
+router.post('/customers/assign-team', authenticateToken, assignCustomerToTeam);
 
 // Route to download customer data with date filter
-router.get('/download-data', authenticateToken, downloadCustomerDataNew);
+router.get('/customers/download', authenticateToken, checkPermission('download_data'), downloadCustomerData);
+
+// Route to get customers by date range
+router.get('/customers/date-range', authenticateToken, checkPermission('download_data'), getCustomersByDateRange);
 
 // Route to check duplicates
 router.post('/customers/check-duplicates', authenticateToken, checkDuplicates);
 
-// Route to get department records with field mapping
-router.post('/records_info', getDepartmentRecords);
+// Route to get team records with field mapping
+router.post('/records_info', getTeamRecords);
+
+// User management routes
+router.post('/users/create', authenticateToken, createUser);
+router.get('/users/all', authenticateToken, getAllUsers);
+router.get('/users/team/:teamId', authenticateToken, getTeamMembers);
 
 export default router;

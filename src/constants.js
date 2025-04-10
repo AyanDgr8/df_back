@@ -1,3 +1,3 @@
 // src/constants.js
 
-export const DB_NAME = "ff_crm" ;
+export const DB_NAME = "df_crm" ;
