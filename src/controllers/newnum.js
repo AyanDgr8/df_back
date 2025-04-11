@@ -4,7 +4,7 @@ import connectDB from '../db/index.js';
 
 // Function to check if customer exists by phone number
 export const checkCustomerByPhone = async (req, res) => {
-  const { phone_no } = req.params;
+  const { mobile } = req.params;
 
   try {
     // Establish database connection
@@ -12,8 +12,8 @@ export const checkCustomerByPhone = async (req, res) => {
 
     // Query to check if customer exists
     const [rows] = await connection.execute(
-      'SELECT * FROM customers WHERE phone_no = ?',
-      [phone_no]
+      'SELECT * FROM customers WHERE mobile = ?',
+      [mobile]
     );
 
     // If customer exists, return their data
@@ -31,7 +31,7 @@ export const checkCustomerByPhone = async (req, res) => {
 
 
 export const insertPrimaryNum = async(req, res)=>{
-  const { phone_no } = req.params;
+  const { mobile } = req.params;
 
   try {
     // Establish database connection
@@ -39,8 +39,8 @@ export const insertPrimaryNum = async(req, res)=>{
 
     // Query to check if customer exists
     const [rows] = await connection.execute(
-      'INSERT * FROM customers WHERE phone_no = ?',
-      [phone_no]
+      'INSERT * FROM customers WHERE mobile = ?',
+      [mobile]
     );
 
     // If customer exists, return their data

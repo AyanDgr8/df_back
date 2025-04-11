@@ -4,20 +4,19 @@ import express from 'express';
 import teamRoutes from './teamRoutes.js';
 
 import {
-    gethistoryCustomer,
     searchCustomers,
-    updateCustomer,
-    historyCustomer,
     getAllCustomers,
-    makeNewRecord,
-    deleteCustomer,
-    updateCustomerFieldsByPhone,
     assignCustomerToTeam,
     checkDuplicates,
     getTeamRecords,
-    createCustomer,
     getCustomersByDateRange
 } from '../controllers/customers.js';
+
+import { deleteCustomer, deleteMultipleCustomers } from '../controllers/deleteCustomers.js';
+
+import { makeNewRecord, createCustomer } from '../controllers/createCustomers.js';
+
+import { updateCustomer, historyCustomer, gethistoryCustomer } from '../controllers/updateCustomers.js';
 
 import { 
     registerCustomer, 
@@ -92,8 +91,11 @@ router.get('/customers/team', authenticateToken, checkPermission('view_team_cust
 router.get('/customers/assigned', authenticateToken, checkPermission('view_assigned_customers'), getAllCustomers);
 
 // Add these after your customer/new route
-router.put('/customer/:id', authenticateToken, checkPermission('edit_customer'), updateCustomer);
-router.delete('/customer/:id', authenticateToken, checkPermission('delete_customer'), deleteCustomer);
+router.patch('/customers/phone/:mobile/updates', authenticateToken, checkPermission('edit_customer'), updateCustomer);
+router.put('/customers/:id', authenticateToken, checkPermission('edit_customer'), updateCustomer);
+
+router.delete('/customers/:id', authenticateToken, checkPermission('delete_customer'), deleteCustomer);
+router.post('/customers/delete-multiple', authenticateToken, checkPermission('delete_customer'), deleteMultipleCustomers);
 
 // Route to check if customer exists by phone number
 router.get('/customers/phone/:mobile', authenticateToken, checkPermission('view_customer'), checkCustomerByPhone);
@@ -104,17 +106,12 @@ router.post('/customer/new', authenticateToken, checkPermission('create_customer
 // Route to create a new customer record with a new number 
 router.post('/customer/new/:mobile', authenticateToken, checkPermission('create_customer'), makeNewRecord);
 
-// Route to update a customer by ID
-router.put('/customers/:id', authenticateToken, checkPermission('edit_customer'), updateCustomer);
-
 // Route to create a new customer
 router.post('/customers/new', authenticateToken, checkPermission('create_customer'), createCustomer);
 
 // Change history routes
 router.get('/customers/log-change/:id', authenticateToken, checkPermission('view_customer'), gethistoryCustomer);
 router.post('/customers/log-change', authenticateToken, checkPermission('edit_customer'), historyCustomer);
-router.patch('/customers/phone/:mobile/updates', authenticateToken, checkPermission('edit_customer'), updateCustomerFieldsByPhone);
-
 
 // File upload routes
 router.post('/upload', authenticateToken, checkPermission('upload_document'), uploadCustomerData);
@@ -126,12 +123,6 @@ router.get('/current-user', authenticateToken, fetchCurrentUser);
 // Reminder routes
 router.get('/customers/reminders', authenticateToken, getReminders);
 router.get('/customers/getAllReminders', authenticateToken, getAllReminders);
-
-// Route to check reminders
-router.get('/customers/reminders', authenticateToken, getReminders);
-
-// Route to update specific customer fields by phone number
-router.post('/customers/phone/:mobile/updates/', updateCustomerFieldsByPhone);
 
 // Route to assign customers to team/agent
 router.post('/customers/assign-team', authenticateToken, assignCustomerToTeam);

@@ -48,9 +48,9 @@ export const checkPermission = (requiredPermission) => {
                 });
             }
 
-            // Super_Admin has all permissions
-            if (req.user.role === 'super_admin') {
-                console.log('User is super_admin, granting access');
+            // Admin roles have all permissions
+            if (['super_admin', 'it_admin', 'business_head'].includes(req.user.role)) {
+                console.log('User is admin role, granting access');
                 return next();
             }
 

@@ -165,157 +165,6 @@ export const getAllCustomers = async (req, res) => {
   }
 };
 
-// *****************
-
-export const updateCustomer = async (req, res) => {
-  try {
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    // Check if user has edit_customer permission or is an admin
-    const isAdmin = req.user.role === 'it_admin' || req.user.role === 'super_admin';
-    const hasEditPermission = req.user.permissions?.includes('edit_customer');
-    console.log('User permissions:', req.user.permissions);
-    console.log('Has edit permission:', hasEditPermission);
-    
-    if (!hasEditPermission && !isAdmin) {
-      return res.status(403).json({ message: 'You do not have permission to edit customer records' });
-    }
-
-    const customerId = req.params.id;
-    const updates = req.body;
-    const username = req.user.username;
-
-    const pool = await connectDB();
-    const connection = await pool.getConnection();
-    
-    try {
-      await connection.beginTransaction();
-
-      // Get current customer data
-      const [currentCustomer] = await connection.query(
-        'SELECT * FROM customers WHERE id = ?',
-        [customerId]
-      );
-
-      if (currentCustomer.length === 0) {
-        await connection.rollback();
-        connection.release();
-        return res.status(404).json({ message: 'Customer not found' });
-      }
-
-      // Function to format date for MySQL
-      const formatMySQLDateTime = (date) => {
-        if (!date) return null;
-        if (date instanceof Date) {
-          return date.toISOString().slice(0, 19).replace('T', ' ');
-        }
-        // If it's an ISO string, convert it to MySQL format
-        if (typeof date === 'string' && date.includes('T')) {
-          // For date-only fields, return just the date part
-          if (date.includes('00:00:00')) {
-            return date.slice(0, 10);
-          }
-          return date.slice(0, 19).replace('T', ' ');
-        }
-        return date;
-      };
-
-      // Default dates
-      const defaultLastPaidDate = '2025-01-01';
-      const defaultScheduledAt = '2025-01-01 13:00:00';
-
-      // Prepare update fields
-      const allowedFields = [
-        'loan_card_no', 'c_name', 'product', 'CRN', 'bank_name', 'banker_name', 'agent_name',
-        'tl_name', 'fl_supervisor', 'DPD_vintage', 'POS', 'emi_AMT',
-        'loan_AMT', 'paid_AMT', 'settl_AMT', 'shots', 'resi_address',
-        'pincode', 'office_address', 'mobile', 'ref_mobile', 'calling_code',
-        'calling_feedback', 'field_feedback', 'new_track_no', 'field_code',
-        'paid_date', 'scheduled_at'
-      ];
-
-      const updateFields = {};
-      const changes = [];
-
-      // Filter and validate updates
-      for (const [key, value] of Object.entries(updates)) {
-        if (allowedFields.includes(key)) {
-          updateFields[key] = value;
-          if (currentCustomer[0][key] !== value) {
-            changes.push({
-              field: key,
-              old_value: currentCustomer[0][key],
-              new_value: value
-            });
-          }
-        }
-      }
-
-      if (Object.keys(updateFields).length === 0) {
-        await connection.rollback();
-        connection.release();
-        return res.status(400).json({ message: 'No valid fields to update' });
-      }
-
-      // Add last_updated timestamp and default dates to updateFields
-      updateFields.last_updated = formatMySQLDateTime(new Date());
-      updateFields.paid_date = formatMySQLDateTime(updateFields.paid_date) || defaultLastPaidDate;
-      updateFields.scheduled_at = formatMySQLDateTime(updateFields.scheduled_at) || defaultScheduledAt;
-
-      // Format any other date fields that might be present
-      if (updateFields.DPD_vintage) {
-        updateFields.DPD_vintage = formatMySQLDateTime(updateFields.DPD_vintage);
-      }
-
-      // Update customer
-      const [updateResult] = await connection.query(
-        'UPDATE customers SET ? WHERE id = ?',
-        [updateFields, customerId]
-      );
-
-      // Log changes
-      if (changes.length > 0) {
-        await insertChangeLog(
-          connection,
-          customerId,
-          currentCustomer[0].C_unique_id,
-          changes,
-          username
-        );
-      }
-
-      // Get the updated change history
-      const [changeHistory] = await connection.query(
-        `SELECT * FROM updates_customer 
-         WHERE customer_id = ? 
-         ORDER BY changed_at DESC, id DESC`,
-        [customerId]
-      );
-
-      await connection.commit();
-      connection.release();
-
-      return res.status(200).json({
-        success: true,
-        message: 'Customer updated successfully',
-        changes: changeHistory
-      });
-
-    } catch (error) {
-      if (connection) {
-        await connection.rollback();
-        connection.release();
-      }
-      console.error('Error updating customer:', error);
-      return res.status(500).json({ message: 'Error updating customer', error: error.message });
-    }
-  } catch (error) {
-    console.error('Error updating customer:', error);
-    return res.status(500).json({ message: 'Error updating customer', error: error.message });
-  }
-};
 
 // *****************
 
@@ -332,406 +181,6 @@ const getAvailableUsers = async (connection) => {
   }
 };
 // *****************
-
-// Function to insert change log entries
-export const insertChangeLog = async (connection, customerId, C_unique_id, changes, username) => {
-  try {
-    // Ensure all required fields are present
-    if (!customerId || !username) {
-      throw new Error('Missing required fields for change log');
-    }
-
-    // Insert each change as a separate record
-    for (const change of changes) {
-      const query = `
-        INSERT INTO updates_customer (
-          customer_id, C_unique_id, field, 
-          old_value, new_value, changed_by, 
-          changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NOW())
-      `;
-
-      const params = [
-        customerId,
-        C_unique_id || null,
-        change.field || null,
-        change.old_value || null,
-        change.new_value || null,
-        username
-      ];
-
-      console.log('Inserting change log:', {
-        query,
-        params,
-        change
-      });
-
-      await connection.execute(query, params);
-    }
-  } catch (error) {
-    console.error('Error inserting change log:', error);
-    throw error;
-  }
-};
-
-export const historyCustomer = async (req, res) => {
-  try {
-    // Check if user exists in request
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const connection = await connectDB();
-    const { customerId, C_unique_id, changes } = req.body;
-
-    // Validate required fields
-    if (!customerId || !changes || !Array.isArray(changes)) {
-      return res.status(400).json({ 
-        message: 'Missing required fields',
-        required: ['customerId', 'changes (array)'],
-        received: req.body
-      });
-    }
-
-    // First get the customer to check authorization
-    const [customer] = await connection.execute(
-      'SELECT agent_name FROM customers WHERE id = ?',
-      [customerId]
-    );
-
-    if (customer.length === 0) {
-      return res.status(404).json({ message: 'Customer not found' });
-    }
-
-    // Check authorization
-    if (req.user.role !== 'super_admin' && req.user.role !== 'business_head' && req.user.role !== 'team_leader' && customer[0].agent_name !== req.user.username) {
-      return res.status(403).json({ 
-        message: 'You are not authorized to log changes for this customer',
-        user: req.user,
-        customerAgent: customer[0].agent_name
-      });
-    }
-
-    // Insert the changes
-    await insertChangeLog(
-      connection,
-      customerId,
-      C_unique_id,
-      changes,
-      req.user.username
-    );
-
-    res.status(200).json({ 
-      message: 'Changes logged successfully',
-      changeCount: changes.length
-    });
-  } catch (error) {
-    console.error('Error logging changes:', error);
-    res.status(500).json({ 
-      message: 'Failed to log changes', 
-      error: error.message,
-      user: req.user
-    });
-  }
-};
-
-
-// Function to fetch change history for a customer
-const getChangeHistory = async (connection, customerId) => {
-  const fetchHistoryQuery = `
-    SELECT * FROM updates_customer 
-    WHERE customer_id = ? 
-    ORDER BY changed_at DESC, id DESC`;
-
-  const [changeHistory] = await connection.execute(fetchHistoryQuery, [customerId]);
-  return changeHistory;
-};
-
-// Main function to handle logging and fetching change history
-export const gethistoryCustomer = async (req, res) => {
-  try {
-    // Check if user exists in request
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const connection = await connectDB();
-    const customerId = req.params.id;
-
-    // First get the customer to check authorization
-    const [customer] = await connection.execute(
-      'SELECT agent_name FROM customers WHERE id = ?',
-      [customerId]
-    );
-
-    if (customer.length === 0) {
-      return res.status(404).json({ message: 'Customer not found' });
-    }
-
-    // Check authorization
-    if (req.user.role !== 'super_admin' && req.user.role !== 'business_head' && req.user.role !== 'team_leader' && customer[0].agent_name !== req.user.username) {
-      return res.status(403).json({ 
-        message: 'You are not authorized to view this customer\'s history',
-        user: req.user,
-        customerAgent: customer[0].agent_name
-      });
-    }
-
-    const changeHistory = await getChangeHistory(connection, customerId);
-    res.status(200).json({ changeHistory });
-  } catch (error) {
-    console.error('Error fetching change history:', error);
-    res.status(500).json({ 
-      message: 'Failed to fetch change history', 
-      error: error.message,
-      user: req.user
-    });
-  }
-};
-
-// ***************
-
-
-export const makeNewRecord = async (req, res) => {
-  try {
-    // Check if user exists in request
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const connection = await connectDB();
-
-    // Constants for ENUM values matching database schema exactly
-    const VALID_C_CODE = ['WN', 'NC', 'CB', 'PTP', 'RTP'];
-    const VALID_F_CODE = ['ANF', 'SKIP', 'RTP', 'REVISIT', 'PTP'];
-    // Validation functions
-    const validateEnum = (value, validValues, defaultValue) => {
-      if (!value) return defaultValue;
-      const normalizedValue = value.toString().toLowerCase().trim();
-      return validValues.includes(normalizedValue) ? normalizedValue : defaultValue;
-    };
-
-    // Default dates
-    const defaultLastPaidDate = '2025-01-01';
-    const defaultScheduledAt = '2025-01-01 13:00:00';
-
-    const validateVarchar = (value, maxLength) => {
-      if (!value) return null;
-      return value.toString().substring(0, maxLength);
-    };
-
-    const validateMobileNumber = (value) => {
-      if (!value) return null;
-      // Remove any non-digit characters
-      const digits = value.toString().replace(/\D/g, '');
-      // Check if the number has more than 12 digits
-      if (digits.length > 12) {
-        throw new Error('Phone number cannot exceed 12 digits');
-      }
-      return digits;
-    };
-
-    // Function to format date for MySQL
-    const formatMySQLDateTime = (date) => {
-      if (!date) return null;
-      if (date instanceof Date) {
-        return date.toISOString().slice(0, 19).replace('T', ' ');
-      }
-      // If it's an ISO string, convert it to MySQL format
-      if (typeof date === 'string' && date.includes('T')) {
-        // For date-only fields, return just the date part
-        if (date.includes('00:00:00')) {
-          return date.slice(0, 10);
-        }
-        return date.slice(0, 19).replace('T', ' ');
-      }
-      return date;
-    };
-
-    // Extract variables from req.body
-    const {
-      loan_card_no, c_name, product, CRN, bank_name, banker_name, 
-      agent_name, tl_name, fl_supervisor, mobile, shots, 
-      office_address, resi_address, 
-      calling_code, calling_feedback, field_feedback, 
-      paid_date,  
-
-
-      scheduled_at
-    } = req.body;
-
-    const errors = [];
-
-    // Validate phone numbers to ensure they are provided
-    if (!mobile) {
-      errors.push('Mobile number is required.');
-    }
-
-    // Validate phone numbers
-    try {
-      if (!mobile) {
-        errors.push('Mobile number is required.');
-      } else {
-        validateMobileNumber(mobile);
-      }
-      if (whatsapp_num) validateMobileNumber(whatsapp_num);
-    } catch (error) {
-      errors.push(error.message);
-    }
-
-
-    // Check if any of the phone numbers or email already exist in the database
-    const conditions = [];
-    const params = [];
-
-    // Helper to check if value is non-null and non-empty
-    const isValidValue = (value) => {
-      return value !== null && value !== undefined && value.toString().trim() !== '';
-    };
-
-    // Add conditions for each field that needs to be checked
-    if (isValidValue(mobile)) {
-      conditions.push('(mobile = ? AND mobile IS NOT NULL AND mobile != "")');
-      params.push(mobile);
-    }
-
-    if (conditions.length > 0) {
-      const [existRecords] = await connection.execute(`
-        SELECT mobile, whatsapp_num, email_id
-        FROM customers 
-        WHERE ${conditions.join(' OR ')}
-      `, params);
-
-      // Check which fields are in use and push appropriate messages
-      if (existRecords.length > 0) {
-        existRecords.forEach(record => {
-          if (isValidValue(mobile) && isValidValue(record.mobile) && record.mobile === mobile) {
-            errors.push('This phone number is already registered in our system');
-          }
-
-        });
-      }
-    }
-
-    // If there are any errors, return them
-    if (errors.length > 0) {
-      return res.status(409).json({ 
-        message: 'Validation failed', 
-        errors,
-        details: 'One or more fields contain values that are already in use'
-      });
-    }
-
-    // Validate disposition length (assuming max length is 50 - adjust this value based on your actual database column definition)
-    if (disposition && disposition.length > 50) {
-      return res.status(400).json({
-        message: 'Disposition value exceeds maximum allowed length of 50 characters'
-      });
-    }
-
-    // Fetch the latest C_unique_id and increment it
-    const [latestCustomer] = await connection.query(`
-      SELECT C_unique_id 
-      FROM customers 
-      ORDER BY id DESC 
-      LIMIT 1
-    `);
-
-    let nextUniqueId;
-    if (latestCustomer.length > 0) {
-      const lastUniqueId = latestCustomer[0].C_unique_id;
-      const lastNumericPart = parseInt(lastUniqueId.split('_')[1]); // Extract the numeric part
-      nextUniqueId = `FF_${lastNumericPart + 1}`;
-    } else {
-      // If no record exists, start with FF_1
-      nextUniqueId = `FF_1`;
-    }
-
-    // Validate all fields
-    const validatedData = {
-      product,
-      CRN,
-      bank_name,
-      banker_name,
-      agent_name,
-      tl_name,
-      fl_supervisor,
-      loan_card_no,
-      mobile,
-
-
-
-      first_name: validateVarchar(first_name, 100),
-      last_name: validateVarchar(last_name, 100),
-      course: validateEnum(course, VALID_COURSES, null),
-      age_group: validateVarchar(age_group, 10),
-      profession: validateVarchar(profession, 30),
-      investment_trading: validateEnum(investment_trading, VALID_INVESTMENT_TYPES, null),
-      followup_count: validateEnum(followup_count, VALID_FOLLOWUP, null),
-      why_choose: validateVarchar(why_choose, 200),
-      language: validateVarchar(language, 50),
-      mentor: validateVarchar(mentor, 50),
-      education: validateVarchar(education, 50),
-      region: validateVarchar(region, 50),
-      designation: validateVarchar(designation, 50),
-      phone_no: validateMobileNumber(phone_no), // Use the validated phone number
-      whatsapp_num: validateMobileNumber(whatsapp_num), // Use the validated WhatsApp number
-      email_id: validateVarchar(email_id, 100),
-      yt_email_id: validateVarchar(yt_email_id, 100),
-      gender: validateEnum(gender, VALID_GENDERS, null),
-      disposition: validateEnum(disposition, VALID_DISPOSITIONS, null),
-      // Use the agent_name from request, fallback to current user's username
-      agent_name: validateVarchar(agent_name, 100) || req.user.username,
-      comment: validateVarchar(comment, 500),
-      C_unique_id: nextUniqueId,
-      scheduled_at: formatMySQLDateTime(scheduled_at) || defaultScheduledAt,
-      paid_date: defaultLastPaidDate,
-      last_updated: formatMySQLDateTime(new Date())
-    };
-
-    const sql = `
-      INSERT INTO customers 
-      (first_name, last_name, course, age_group, profession, 
-      investment_trading, why_choose, language, education, 
-      region, designation, phone_no, whatsapp_num, C_unique_id,
-      email_id, yt_email_id, gender, disposition, followup_count
-      agent_name, comment, scheduled_at, mentor)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;    
-
-    const values = [
-      validatedData.first_name, validatedData.last_name, validatedData.course,
-      validatedData.age_group, validatedData.profession, validatedData.investment_trading,
-      validatedData.why_choose, validatedData.language, validatedData.education,
-      validatedData.region, validatedData.designation, validatedData.phone_no,
-      validatedData.mentor, validatedData.followup_count,
-      validatedData.whatsapp_num, validatedData.C_unique_id, validatedData.email_id,
-      validatedData.yt_email_id, validatedData.gender, validatedData.disposition,
-      validatedData.agent_name, validatedData.comment, validatedData.scheduled_at
-    ];
-
-    // Insert the customer record
-    const [result] = await connection.query(sql, values);
-    const customerId = result.insertId;
-
-    // If the user is a team_leader, automatically assign the record to their team
-    if (req.user.role === 'team_leader' && req.user.team_id) {
-      await connection.query(`
-        INSERT INTO customer_team_assignments (customer_id, team_id, assigned_by)
-        VALUES (?, ?, ?)
-      `, [customerId, req.user.team_id, req.user.username]);
-    }
-
-    res.status(201).json({ 
-      message: 'Record added successfully', 
-      C_unique_id: nextUniqueId,
-      agent_name: validatedData.agent_name // Return the agent_name in response
-    });
-  } catch (error) {
-    console.error('Error creating new customer record:', error);
-    res.status(500).json({ message: 'Error adding new record', error: error.message });
-  }
-};
 
 
 // ***********
@@ -763,55 +212,8 @@ export const viewCustomer = async (req, res) => {
 };
 // ******************
 
-// Function to delete from the updates_customer table
-const deleteCustomerUpdates = async (connection, customerId) => {
-  const deleteUpdatesQuery = `
-    DELETE FROM updates_customer 
-    WHERE customer_id = ?`;
-
-  await connection.execute(deleteUpdatesQuery, [customerId]);
-};
-
-// Function to delete from the customers table
-const deleteCustomerRecord = async (connection, customerId) => {
-  const deleteCustomerQuery = `
-    DELETE FROM customers 
-    WHERE id = ?`;
-
-  await connection.execute(deleteCustomerQuery, [customerId]);
-};
-
-// Combined function to handle deleting a customer and associated updates
-export const deleteCustomer = async (req, res) => {
-  const customerId = req.params.id;  // Assuming customerId is passed as a URL parameter
-
-  try {
-    // Check if user exists in request
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    if (!customerId || isNaN(customerId)) {
-      return res.status(400).json({ message: 'Valid Customer ID is required' });
-    }
-
-    const connection = await connectDB();
-
-    // Delete from updates_customer table first to ensure relational integrity
-    await deleteCustomerUpdates(connection, customerId);
-
-    // Then delete from customers table
-    await deleteCustomerRecord(connection, customerId);
-
-    res.status(200).json({ message: 'Customer and associated updates deleted successfully!' });
-  } catch (error) {
-    console.error('Error deleting customer and updates:', error);
-    res.status(500).json({ message: 'Failed to delete customer and updates' });
-  }
-};
 
 // ***********
-
 // Function to get list of users for agent assignment
 export const getUsers = async (req, res) => {
     try {
@@ -989,85 +391,6 @@ export const assignCustomerToTeam = async (req, res) => {
 // ******************
 
 
-export const updateCustomerFieldsByPhone = async (req, res) => {
-  console.log('Request Headers:', req.headers);
-  console.log('Query Parameters:', req.query);
-  
-  const phoneNumber = req.params.phone_no;
-  const queryParams = req.query;
-
-  console.log('Incoming updates:', queryParams);
-
-  // Validate that updates are provided
-  if (!queryParams || Object.keys(queryParams).length === 0) {
-    return res.status(400).json({ error: 'No valid updates provided.' });
-  }
-
-  try {
-    // Check if user exists in request
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const connection = await connectDB();
-
-  
-      // First, get the current customer details and C_unique_id
-      const [customerRows] = await connection.execute(
-        'SELECT * FROM customers WHERE phone_no = ? ORDER BY last_updated DESC, id DESC',
-        [phoneNumber]
-      );
-  
-      if (customerRows.length === 0) {
-        await connection.end();
-        return res.status(404).json({ error: 'Customer not found.' });
-      }
-  
-      const customer = customerRows[0];
-      const customerId = customer.id;
-      const cUniqueId = customer.C_unique_id;
-
-        // Process each update
-        for (const [field, newValue] of Object.entries(queryParams)) {
-          // Verify the field exists in customers table
-          if (customer.hasOwnProperty(field)) {
-            const oldValue = customer[field];
-  
-            // Insert into updates_customer table
-            await connection.execute(
-              `INSERT INTO updates_customer 
-              (customer_id, C_unique_id, field, 
-              old_value, new_value, changed_by, 
-              changed_at)
-              VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-              [customerId, cUniqueId, field, oldValue, newValue, req.user.username]
-            );
-  
-            // Update the customers table
-            await connection.execute(
-              `UPDATE customers SET ${field} = ? WHERE id = ?`,
-              [newValue, customerId]
-            );
-          }
-        }
-  
-        res.status(200).json({ 
-          message: 'Customer details updated successfully.',
-          updatedFields: Object.keys(queryParams),
-          phoneNumber,
-          C_unique_id: cUniqueId
-        });
-
-  } catch (error) {
-    console.error('Error updating customer details:', error);
-    res.status(500).json({ 
-      error: 'Failed to update customer details.',
-      details: error.message 
-    });
-  }
-};
-
-
 // New function to get teams list
 export const getTeams = async (req, res) => {
   try {
@@ -1079,8 +402,8 @@ export const getTeams = async (req, res) => {
     let query;
     let params = [];
 
-    if (req.user.role === 'super_admin') {
-      // Super_Admin can see all teams
+    if (req.user.role === 'super_admin' || req.user.role === 'it_admin' || req.user.role === 'business_head') {
+      // Super_Admin, IT Admin and Business Head can see all teams
       query = 'SELECT id, name FROM teams ORDER BY name';
     } else if (req.user.role === 'team_leader') {
       // team_leader can only see their team
@@ -1110,7 +433,7 @@ export const getTeams = async (req, res) => {
 export const checkDuplicates = async (req, res) => {
     try {
         const connection = await connectDB();
-        const { currentCustomerId, phone_no, whatsapp_num, email_id } = req.body;
+        const { currentCustomerId, mobile, CRN } = req.body;
         
         const conditions = [];
         const params = [currentCustomerId]; // Start with customerId for the != condition
@@ -1122,14 +445,14 @@ export const checkDuplicates = async (req, res) => {
         };
 
         // Add conditions for each field that needs to be checked
-        if (isValidValue(email_id)) {
-            conditions.push('(email_id = ? AND email_id IS NOT NULL AND email_id != "")');
-            params.push(email_id);
+        if (isValidValue(CRN)) {
+            conditions.push('(CRN = ? AND CRN IS NOT NULL AND CRN != "")');
+            params.push(CRN);
         }
 
         if (conditions.length > 0) {
             const [existRecords] = await connection.query(`
-                SELECT id, phone_no, email_id, first_name, last_name
+                SELECT id, mobile, CRN, c_name
                 FROM customers 
                 WHERE id != ? ${conditions.length > 0 ? 'AND (' + conditions.join(' OR ') + ')' : ''}
             `, params);
@@ -1137,16 +460,13 @@ export const checkDuplicates = async (req, res) => {
             // Check which fields are in use and push detailed error messages
             if (existRecords.length > 0) {
                 existRecords.forEach(record => {
-                    const customerInfo = `${record.first_name} ${record.last_name} `;
+                    const customerInfo = `${record.c_name} `;
                     
-                    if (isValidValue(phone_no) && isValidValue(record.phone_no) && record.phone_no === phone_no) {
-                        duplicates.push(`Phone number ${phone_no} is already registered with customer ${customerInfo}`);
+                    if (isValidValue(mobile) && isValidValue(record.mobile) && record.mobile === mobile) {
+                        duplicates.push(`Phone number ${mobile} is already registered with customer ${customerInfo}`);
                     }
-                    if (isValidValue(whatsapp_num) && isValidValue(record.whatsapp_num) && record.whatsapp_num === whatsapp_num) {
-                        duplicates.push(`WhatsApp number ${whatsapp_num} is already registered with customer ${customerInfo}`);
-                    }
-                    if (isValidValue(email_id) && isValidValue(record.email_id) && record.email_id === email_id) {
-                        duplicates.push(`Email address ${email_id} is already registered with customer ${customerInfo}`);
+                    if (isValidValue(CRN) && isValidValue(record.CRN) && record.CRN === CRN) {
+                        duplicates.push(`CRN ${CRN} is already registered with customer ${customerInfo}`);
                     }
                 });
             }
@@ -1172,7 +492,7 @@ export const checkDuplicates = async (req, res) => {
 export const getTeamRecords = async (req, res) => {
   try {
       const connection = await connectDB();
-      const query = `SELECT first_name, phone_no FROM customers ORDER BY last_updated DESC, id DESC`;
+      const query = `SELECT c_name, mobile FROM customers ORDER BY last_updated DESC, id DESC`;
       const [records] = await connection.query(query);
 
       // Check if request body is empty
@@ -1188,10 +508,10 @@ export const getTeamRecords = async (req, res) => {
       }
 
       // If body exists, apply field mapping
-      const { first_name = "first_name", number = "phone_no" } = req.body;
+      const { first_name = "c_name", number = "mobile" } = req.body;
       const mappedRecords = records.map(record => ({
-        [first_name]: record.first_name,
-        [number]: record.phone_no,
+        [first_name]: record.c_name,
+        [number]: record.mobile,
         priority: "1"
       }));
 
@@ -1211,88 +531,7 @@ export const getTeamRecords = async (req, res) => {
   }
 };
 
-// Create new customer
-export const createCustomer = async (req, res) => {
-  let connection;
-  try {
-    const pool = await connectDB();
-    connection = await pool.getConnection();
-
-    // Generate unique customer ID
-    const uniqueId = Math.random().toString(36).substring(2, 8).toUpperCase();
-
-    // Start transaction
-    await connection.beginTransaction();
-
-    try {
-      // Insert new customer
-      const [result] = await connection.query(
-        `INSERT INTO customers (
-          loan_card_no, CRN, c_name, product, bank_name, banker_name,
-          mobile, ref_mobile, agent_name, tl_name, fl_supervisor,
-          DPD_vintage, POS, emi_AMT, loan_AMT, paid_AMT, settl_AMT,
-          shots, resi_address, pincode, office_address, new_track_no,
-          calling_code, field_code, C_unique_id, calling_feedback,
-          field_feedback, scheduled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          req.body.loan_card_no || null,
-          req.body.CRN || null,
-          req.body.c_name || null,
-          req.body.product || null,
-          req.body.bank_name || null,
-          req.body.banker_name || null,
-          req.body.mobile || null,
-          req.body.ref_mobile || null,
-          req.body.agent_name || null,
-          req.body.tl_name || null,
-          req.body.fl_supervisor || null,
-          req.body.DPD_vintage || null,
-          req.body.POS || null,
-          req.body.emi_AMT || null,
-          req.body.loan_AMT || null,
-          req.body.paid_AMT || null,
-          req.body.settl_AMT || null,
-          req.body.shots || null,
-          req.body.resi_address || null,
-          req.body.pincode || null,
-          req.body.office_address || null,
-          req.body.new_track_no || null,
-          req.body.calling_code || 'WN',
-          req.body.field_code || 'ANF',
-          uniqueId,
-          req.body.calling_feedback || null,
-          req.body.field_feedback || null,
-          req.body.scheduled_at || null
-        ]
-      );
-
-      await connection.commit();
-
-      res.json({
-        success: true,
-        message: 'Customer created successfully',
-        customerId: result.insertId,
-        C_unique_id: uniqueId
-      });
-
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    }
-  } catch (error) {
-    console.error('Error creating customer:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create customer',
-      error: error.message
-    });
-  } finally {
-    if (connection) {
-      connection.release();
-    }
-  }
-};
+// ******************
 
 // Function to get customers by last_updated date range
 export const getCustomersByDateRange = async (req, res) => {
@@ -1346,3 +585,5 @@ export const getCustomersByDateRange = async (req, res) => {
         }
     }
 };
+
+// **********

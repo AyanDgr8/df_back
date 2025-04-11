@@ -68,10 +68,10 @@ export const uploadCustomerData = async (req, res) => {
                     });
                 }
 
-                // Check for duplicate based on loan_card_no or mobile
+                // Check for duplicate based on c_name or mobile
                 const [existingCustomer] = await connection.query(
-                    'SELECT id FROM customers WHERE loan_card_no = ? OR mobile = ?',
-                    [record[headerMapping['loan_card_no']], record[headerMapping['mobile']]]
+                    'SELECT id FROM customers WHERE c_name = ? OR mobile = ?',
+                    [record[headerMapping['c_name']], record[headerMapping['mobile']]]
                 );
 
                 if (existingCustomer.length > 0) {
@@ -173,20 +173,8 @@ export const confirmUpload = async (req, res) => {
             clearTimeout(timeout);
             return res.status(400).json({
                 success: false,
-                message: 'No unique records to upload. All records are duplicates.'
+                message: 'No records to upload.'
             });
-        }
-
-        // Use data from request if uploadDataStore is empty
-        let uploadData;
-        if (!uploadDataStore.has(uploadId)) {
-            uploadData = {
-                newRecords: customerData || [],
-                headerMapping: headerMapping || {},
-                validAgents: uploadResult?.validAgents || []
-            };
-        } else {
-            uploadData = uploadDataStore.get(uploadId);
         }
 
         // Get database connection
@@ -199,8 +187,10 @@ export const confirmUpload = async (req, res) => {
         connection = await pool.getConnection();
         await connection.beginTransaction();
 
-        if (proceed) {
-            // Get the latest C_unique_id - optimize by using LIMIT
+        let recordsUploaded = 0;
+
+        if (proceed && customerData.length > 0) {
+            // Get the latest C_unique_id
             const [lastIdResult] = await connection.query(
                 'SELECT C_unique_id FROM customers ORDER BY CAST(SUBSTRING(C_unique_id, 4) AS UNSIGNED) DESC LIMIT 1'
             );
@@ -208,6 +198,58 @@ export const confirmUpload = async (req, res) => {
             const lastId = lastIdResult[0]?.C_unique_id || 'DF_0';
             const lastNumericPart = parseInt(lastId.split('_')[1]) || 0;
             let nextId = lastNumericPart + 1;
+
+            // Helper function to format date
+            const formatDate = (dateStr) => {
+                if (!dateStr) return null;
+                
+                // Convert to string and trim
+                const strDate = String(dateStr).trim();
+                if (!strDate) return null;
+
+                try {
+                    // First try to handle Excel date number (days since December 30, 1899)
+                    const numericDate = Number(strDate.replace(/[^0-9]/g, ''));
+                    if (!isNaN(numericDate)) {
+                        // Excel date starting point (December 30, 1899)
+                        const excelEpoch = new Date(1899, 11, 30);
+                        const date = new Date(excelEpoch.getTime() + (numericDate * 24 * 60 * 60 * 1000));
+                        
+                        // Validate the resulting date
+                        if (!isNaN(date.getTime()) && date.getFullYear() >= 2000 && date.getFullYear() <= 2100) {
+                            return date.toISOString().slice(0, 10);
+                        }
+                    }
+
+                    // Try DD/MM/YYYY format
+                    const parts = strDate.split('/');
+                    if (parts.length === 3) {
+                        const day = parseInt(parts[0], 10);
+                        const month = parseInt(parts[1], 10);
+                        const year = parseInt(parts[2], 10);
+
+                        if (day > 0 && day <= 31 && 
+                            month > 0 && month <= 12 && 
+                            year >= 2000 && year <= 2100) {
+                            const paddedDay = day.toString().padStart(2, '0');
+                            const paddedMonth = month.toString().padStart(2, '0');
+                            return `${year}-${paddedMonth}-${paddedDay}`;
+                        }
+                    }
+
+                    // Try parsing as regular date string
+                    const date = new Date(strDate);
+                    if (!isNaN(date.getTime()) && date.getFullYear() >= 2000 && date.getFullYear() <= 2100) {
+                        return date.toISOString().slice(0, 10);
+                    }
+
+                    console.warn(`Invalid date format for value: ${strDate}`);
+                    return null;
+                } catch (error) {
+                    console.error(`Error formatting date: ${strDate}`, error);
+                    return null;
+                }
+            };
 
             // Prepare the base query
             const insertQuery = `INSERT INTO customers (
@@ -220,42 +262,41 @@ export const confirmUpload = async (req, res) => {
                 field_code, C_unique_id
             ) VALUES ?`;
 
-            // Prepare all values in a single array for bulk insert
-            const values = uploadData.newRecords.map(record => [
-                record[uploadData.headerMapping['loan_card_no']], record[uploadData.headerMapping['c_name']], 
-                record[uploadData.headerMapping['product']], record[uploadData.headerMapping['CRN']], 
-                record[uploadData.headerMapping['bank_name']], record[uploadData.headerMapping['banker_name']], 
-                record[uploadData.headerMapping['agent_name']], record[uploadData.headerMapping['tl_name']], 
-                record[uploadData.headerMapping['fl_supervisor']], record[uploadData.headerMapping['DPD_vintage']], 
-                record[uploadData.headerMapping['POS']], record[uploadData.headerMapping['emi_AMT']], 
-                record[uploadData.headerMapping['loan_AMT']], record[uploadData.headerMapping['paid_AMT']],
-                record[uploadData.headerMapping['paid_date']], record[uploadData.headerMapping['settl_AMT']], 
-                record[uploadData.headerMapping['shots']], record[uploadData.headerMapping['resi_address']], 
-                record[uploadData.headerMapping['pincode']], record[uploadData.headerMapping['office_address']], 
-                record[uploadData.headerMapping['mobile']], record[uploadData.headerMapping['ref_mobile']], 
-                record[uploadData.headerMapping['calling_code']], record[uploadData.headerMapping['calling_feedback']], 
-                record[uploadData.headerMapping['field_feedback']], record[uploadData.headerMapping['new_track_no']],
-                record[uploadData.headerMapping['field_code']], `DF_${nextId++}`
+            // Prepare values array
+            const values = customerData.map(record => [
+                record[headerMapping['loan_card_no']], record[headerMapping['c_name']], 
+                record[headerMapping['product']], record[headerMapping['CRN']], 
+                record[headerMapping['bank_name']], record[headerMapping['banker_name']], 
+                record[headerMapping['agent_name']], record[headerMapping['tl_name']], 
+                record[headerMapping['fl_supervisor']], record[headerMapping['DPD_vintage']], 
+                record[headerMapping['POS']], record[headerMapping['emi_AMT']], 
+                record[headerMapping['loan_AMT']], record[headerMapping['paid_AMT']],
+                formatDate(record[headerMapping['paid_date']]), record[headerMapping['settl_AMT']], 
+                record[headerMapping['shots']], record[headerMapping['resi_address']], 
+                record[headerMapping['pincode']], record[headerMapping['office_address']], 
+                record[headerMapping['mobile']], record[headerMapping['ref_mobile']], 
+                record[headerMapping['calling_code']], record[headerMapping['calling_feedback']], 
+                record[headerMapping['field_feedback']], record[headerMapping['new_track_no']],
+                record[headerMapping['field_code']], `DF_${nextId++}`
             ]);
 
             // Perform bulk insert
-            await connection.query(insertQuery, [values]);
+            const [insertResult] = await connection.query(insertQuery, [values]);
+            recordsUploaded = insertResult.affectedRows;
+            await connection.commit();
         }
 
         // Clear the upload data if it exists
         if (uploadDataStore.has(uploadId)) {
             uploadDataStore.delete(uploadId);
         }
-        
-        await connection.commit();
-        clearTimeout(timeout);
 
+        clearTimeout(timeout);
         res.status(200).json({ 
             success: true,
-            message: proceed ? 'Records uploaded successfully' : 'Upload cancelled',
-            recordsProcessed: proceed ? uploadData.newRecords.length : 0
+            message: proceed ? `Successfully uploaded ${recordsUploaded} records` : 'Upload cancelled',
+            recordsUploaded
         });
-
     } catch (error) {
         console.error('Error in confirmUpload:', error);
         clearTimeout(timeout);
