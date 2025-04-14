@@ -22,8 +22,10 @@ export const searchCustomers = async (req, res) => {
       'c.agent_name', 'c.tl_name', 'c.fl_supervisor', 'c.DPD_vintage',
       'c.POS', 'c.emi_AMT', 'c.loan_AMT', 'c.paid_AMT', 'c.paid_date',
       'c.settl_AMT', 'c.shots',
-      'c.resi_address', 'c.pincode', 'c.office_address', 'c.mobile',
-      'c.ref_mobile', 'c.calling_code', 'c.calling_feedback',
+      'c.resi_address', 'c.pincode', 'c.office_address', 
+      'c.mobile', 'c.ref_mobile', 
+      'c.mobile_3', 'c.mobile_4', 'c.mobile_5', 'c.mobile_6', 'c.mobile_7', 'c.mobile_8',
+      'c.calling_code', 'c.calling_feedback',
       'c.field_feedback', 'c.new_track_no', 'c.field_code', 'c.C_unique_id',
       'c.last_updated', 'c.id'
     ];

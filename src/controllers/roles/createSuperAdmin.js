@@ -24,31 +24,18 @@ const createSuperAdmin = async () => {
         try {
             await connection.beginTransaction();
 
-            // Check if username or email already exists
-            const [existingUser] = await connection.query(
-                'SELECT * FROM users WHERE email = ? OR username = ?',
-                [email, username]
-            );
-
-            if (existingUser.length > 0) {
-                await connection.rollback();
-                const message = existingUser[0].email === email ? 'Email already exists' : 'Username already exists';
-                console.error(`Error: ${message}`);
-                return;
-            }
-
-            // Get super_admin role id
+            // Get Super Admin role ID
             const [roleRows] = await connection.query(
                 'SELECT id FROM roles WHERE role_name = ?',
                 ['super_admin']
             );
 
             if (roleRows.length === 0) {
-                throw new Error('super_admin role not found');
+                throw new Error('Super Admin role not found');
             }
 
-            // Insert or update the Super Admin user
-            await connection.query(
+            // Create or update the Super Admin user
+            const [userResult] = await connection.query(
                 `INSERT INTO users (username, email, password, role_id)
                  VALUES (?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE
@@ -56,8 +43,24 @@ const createSuperAdmin = async () => {
                 [username, email, hashedPassword, roleRows[0].id, hashedPassword, roleRows[0].id]
             );
 
+            // Get user ID
+            const userId = userResult.insertId || userResult.id;
+
+            // Get all permissions
+            const [permissions] = await connection.query('SELECT id FROM permissions');
+
+            // Assign all permissions to Super Admin
+            for (const permission of permissions) {
+                await connection.query(
+                    `INSERT INTO user_permissions (user_id, permission_id, value)
+                     VALUES (?, ?, true)
+                     ON DUPLICATE KEY UPDATE value = true`,
+                    [userId, permission.id]
+                );
+            }
+
             await connection.commit();
-            console.log('Super Admin created/updated successfully!');
+            console.log('Super Admin created/updated successfully with all permissions!');
 
         } catch (error) {
             await connection.rollback();
@@ -73,4 +76,3 @@ const createSuperAdmin = async () => {
 
 // Run the function
 createSuperAdmin();
-

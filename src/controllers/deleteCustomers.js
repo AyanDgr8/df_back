@@ -31,11 +31,12 @@ const deleteCustomerUpdates = async (connection, customerId) => {
       if (!req.user) {
         return res.status(401).json({ message: 'Authentication required' });
       }
-  
-      if (req.user.role === 'user') {
-        return res.status(403).json({ message: 'Insufficient permissions' });
+
+      // Check for delete_customer permission
+      if (!req.user.permissions || !req.user.permissions.includes('delete_customer')) {
+        return res.status(403).json({ message: 'You do not have permission to delete customers' });
       }
-  
+
       if (!customerId || isNaN(customerId)) {
         return res.status(400).json({ message: 'Valid Customer ID is required' });
       }
